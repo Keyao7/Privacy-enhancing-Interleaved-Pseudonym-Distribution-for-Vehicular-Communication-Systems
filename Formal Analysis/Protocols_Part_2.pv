@@ -1,0 +1,189 @@
+(* Part II covers protocol 7-8 *)
+(* 
+    Protocol 7: LTC Revocation
+    Protocol 8: Pseudonym Revocation
+*)
+
+(* By Keyao Huang *)
+
+(* Key type *)
+type skey.
+type pkey.
+fun pk(skey): pkey.
+
+(* Signature *)
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, sk: skey; verify(m, sign(m, sk), pk(sk)) = true.
+
+(* Hash function *)
+fun H(bitstring) : bitstring.
+
+(* Defining a typeConverter to take input of type data and returns a result of pkey. *)
+fun pkey_to_bitstring(pkey): bitstring [typeConverter].
+
+type Nonce.
+type Time.
+type Host.
+
+free LTCA:Host.
+free RA:Host.
+free PCA_i:Host.
+free PCA_j:Host.
+
+(* Assume that TLS has been established and the key has been negotiated. *) 
+free tlsC_RA_LTCA:channel[private].
+free tlsC_RA_PCA_i:channel[private].
+free tlsC_RA_PCA_j:channel[private].
+
+
+(* Adding vehicle's certificate to CRL *)
+fun add_LTC_to_CRL(pkey):bitstring.
+fun add_psnym_to_CRL(bitstring):bitstring.
+
+(* Private keys for entities *)
+free lsk_v:skey[private].
+free lpk_v:pkey[private].
+free lsk_RA:skey[private].
+free lsk_LTCA:skey[private].
+free lsk_PCA_i:skey[private].
+free lsk_PCA_j:skey[private].
+
+(* Pseudonyms *)
+free psnym_i:bitstring[private].
+free psnym_j:bitstring[private].
+
+
+free ticket:bitstring[private].
+free t_s:Time[private].
+free t_e:Time[private].
+free Rnd_tkt:bitstring[private].
+free Rnd_ck_tkt: bitstring[private].
+free CK_tkt:bitstring[private].
+free t_s_psnym:Time[private].
+free t_e_psnym:Time[private].
+free Rnd_psnym:bitstring[private].
+free CK_psnym:bitstring[private].
+
+event LTC_revocation_response_is_validated(Host, Host).
+event psnym_revocation_response_is_validated(Host, Host).
+
+query event (LTC_revocation_response_is_validated(RA, LTCA)).
+query event (psnym_revocation_response_is_validated(RA, PCA_i)).
+query event (psnym_revocation_response_is_validated(RA, PCA_j)).
+
+query attacker(lsk_v).
+query attacker(lpk_v).
+query attacker(lsk_LTCA).
+query attacker(lsk_PCA_i).
+query attacker(lsk_PCA_j).
+
+query attacker(ticket).
+query attacker(t_s).
+query attacker(t_e).
+query attacker(Rnd_tkt).
+query attacker(Rnd_ck_tkt).
+query attacker(CK_tkt).
+query attacker(t_s_psnym).
+query attacker(t_e_psnym).
+query attacker(Rnd_psnym).
+query attacker(CK_psnym).
+
+(* For strong-secrecy *)
+noninterf ticket.
+noninterf lsk_v.
+noninterf lpk_v.
+noninterf t_s.
+noninterf t_e.
+noninterf Rnd_tkt.
+noninterf Rnd_ck_tkt.
+noninterf CK_tkt.
+noninterf t_s_psnym.
+noninterf t_e_psnym.
+noninterf Rnd_psnym.
+noninterf CK_psnym.
+        
+
+let LTCA_Process (lsk_LTCA:skey, lpk_RA:pkey, lpk_v:pkey, ticket:bitstring) = 
+    in(tlsC_RA_LTCA, (=ticket, LTC_revocation_request:bitstring, signed_LTC_revocation_request:bitstring));
+    if verify(LTC_revocation_request, signed_LTC_revocation_request, lpk_RA) then
+        let (Id_req:bitstring, Act:bitstring, =ticket, nonce':Nonce, t_now':Time) = LTC_revocation_request in
+            let ACK = add_LTC_to_CRL(lpk_v) in
+            let signed_ACK = sign(ACK, lsk_LTCA) in
+            out(tlsC_RA_LTCA, (ticket, ACK, signed_ACK, LTCA)).
+
+let PCA_i_Process (lsk_PCA_i:skey, lpk_RA:pkey, ticket:bitstring, psnym:bitstring) = 
+    (* Pseudonym revocation from RA *)
+    in(tlsC_RA_PCA_i, (=ticket, psnym_revocation_request:bitstring, signed_psnym_revocation_request:bitstring));
+        if verify(psnym_revocation_request, signed_psnym_revocation_request, lpk_RA) then
+            let ACK = add_psnym_to_CRL(psnym) in
+            let signed_ACK = sign(ACK, lsk_PCA_i) in
+            out(tlsC_RA_PCA_i, (ticket, ACK, signed_ACK, PCA_i)).
+
+let PCA_j_Process (lsk_PCA_j:skey, lpk_RA:pkey, ticket:bitstring, psnym:bitstring) = 
+    (* Pseudonym revocation from RA *)
+    in(tlsC_RA_PCA_j, (=ticket, psnym_revocation_request:bitstring, signed_psnym_revocation_request:bitstring));
+        if verify(psnym_revocation_request, signed_psnym_revocation_request, lpk_RA) then
+            let ACK = add_psnym_to_CRL(psnym) in
+            let signed_ACK = sign(ACK, lsk_PCA_j) in
+            out(tlsC_RA_PCA_j, (ticket, ACK, signed_ACK, PCA_j)).
+
+let RA_Process (lsk_RA:skey, lpk_v:pkey, lpk_LTCA:pkey, lpk_PCA_i:pkey, lpk_PCA_j:pkey, ticket:bitstring, reported_psnym:bitstring) = 
+    new Id_req:bitstring;
+    new Act:bitstring;
+    new nonce:Nonce;
+    new t_now:Time;
+
+    (* Constructing LTC revocation request *)
+    let LTC_revocation_request = (Id_req, Act, ticket, nonce, t_now) in
+    let signed_LTC_revocation_request = sign(LTC_revocation_request, lsk_RA) in
+    out(tlsC_RA_LTCA, (ticket, LTC_revocation_request, signed_LTC_revocation_request));
+    in(tlsC_RA_LTCA, (=ticket, ACK:bitstring, signed_ACK:bitstring, LTCA:Host));
+    
+    if verify(ACK, signed_ACK, lpk_LTCA) && add_LTC_to_CRL(lpk_v) = ACK then
+        event LTC_revocation_response_is_validated(RA, LTCA);
+    
+        new Id_req:bitstring;
+        new Act:bitstring;
+        new nonce:Nonce;
+        new t_now:Time;
+
+        (* Constructing pseudonym revocation request *)
+        let psnym_revocation_request = (Id_req, Act, ticket, nonce, t_now) in
+        let signed_psnym_revocation_request = sign(psnym_revocation_request, lsk_RA) in
+
+        (* Informing PCAs to revoke pseudonym *)
+        out(tlsC_RA_PCA_i, (ticket, psnym_revocation_request, signed_psnym_revocation_request));
+        in(tlsC_RA_PCA_i, (=ticket, ACK_i:bitstring, signed_ACK_i:bitstring, PCA_i:Host));
+
+        out(tlsC_RA_PCA_j, (ticket, psnym_revocation_request, signed_psnym_revocation_request));
+        in(tlsC_RA_PCA_j, (=ticket, ACK_j:bitstring, signed_ACK_j:bitstring, PCA_j:Host));
+
+        (* Determing whether revocation is successful *)
+        if verify(ACK_i, signed_ACK_i, lpk_PCA_i) && verify(ACK_j, signed_ACK_j, lpk_PCA_j) then
+            event psnym_revocation_response_is_validated(RA, PCA_i);
+            event psnym_revocation_response_is_validated(RA, PCA_j).
+        
+process
+    new Rnd_tkt:bitstring;
+    new t_s:Time;
+    new t_e:Time;
+    new np:bitstring;
+    let H1 = H(Rnd_tkt) in
+    let H2 = H(Rnd_tkt) in
+    new Rnd_ck_tkt:bitstring;
+    let CK_tkt = H((pk(lsk_v), t_s, t_e, Rnd_ck_tkt)) in
+    let ticket = (np, H1, H2, CK_tkt, t_s, t_e) in
+
+    new t_s_psnym:Time;
+    new t_e_psnym:Time;
+    new Rnd_psnym:bitstring;
+
+    let CK_psnym = H((CK_tkt, t_s_psnym, t_e_psnym, H(Rnd_psnym))) in
+    let psnym_i = (CK_psnym, t_s_psnym, t_e_psnym) in
+    let psnym_j = (CK_psnym, t_s_psnym, t_e_psnym) in
+
+
+    (!LTCA_Process(lsk_LTCA, pk(lsk_RA), pk(lsk_v), ticket)) 
+    |(!PCA_i_Process(lsk_PCA_i, pk(lsk_RA), ticket, psnym_i))
+    |(!PCA_j_Process(lsk_PCA_j, pk(lsk_RA), ticket, psnym_j))
+    |(!RA_Process(lsk_RA, pk(lsk_v), pk(lsk_LTCA), pk(lsk_PCA_i), pk(lsk_PCA_j), ticket, psnym_j))

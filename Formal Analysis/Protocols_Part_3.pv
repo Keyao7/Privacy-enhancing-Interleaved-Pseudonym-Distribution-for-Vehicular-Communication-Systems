@@ -1,0 +1,166 @@
+(* Part III covers protocol 9 *)
+(* 
+    Protocol : Appeal Mechanism
+*)
+
+(* By Keyao Huang *)
+
+(* Key type *)
+type skey.
+type pkey.
+fun pk(skey): pkey.
+
+(* Signature *)
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, sk: skey; verify(m, sign(m, sk), pk(sk)) = true.
+
+(* Hash function *)
+fun H(bitstring) : bitstring.
+
+(* Defining a typeConverter to take input of type data and returns a result of pkey. *)
+fun pkey_to_bitstring(pkey): bitstring [typeConverter].
+
+type Nonce.
+type Time.
+type Host.
+
+free V:Host.
+free RA:Host.
+
+(* Assume that TLS has been established and the key has been negotiated. *) 
+free tlsC_RA_V:channel[private].
+
+(* Notifying the vehicle whose certificate has been revoked *)
+free CRLC:channel[private].
+
+(* Private keys for entities *)
+free lsk_v:skey[private].
+free lpk_v:pkey[private].
+free lsk_RA:skey[private].
+
+free ticket:bitstring[private].
+free t_s:Time[private].
+free t_e:Time[private].
+free Rnd_tkt:bitstring[private].
+free Rnd_ck_tkt: bitstring[private].
+free CK_tkt:bitstring[private].
+free t_s_psnym:Time[private].
+free t_e_psnym:Time[private].
+free Rnd_psnym:bitstring[private].
+free CK_psnym:bitstring[private].
+
+event appeal_mechanism_complete(Host, Host).
+query event (appeal_mechanism_complete(RA, V)).
+
+query attacker(lsk_v).
+query attacker(lsk_RA).
+
+query attacker(ticket).
+query attacker(t_s).
+query attacker(t_e).
+query attacker(Rnd_tkt).
+query attacker(Rnd_ck_tkt).
+query attacker(CK_tkt).
+query attacker(t_s_psnym).
+query attacker(t_e_psnym).
+query attacker(Rnd_psnym).
+query attacker(CK_psnym).
+
+(* For strong-secrecy *)
+noninterf ticket.
+noninterf lsk_v.
+noninterf t_s.
+noninterf t_e.
+noninterf Rnd_tkt.
+noninterf Rnd_ck_tkt.
+noninterf CK_tkt.
+noninterf t_s_psnym.
+noninterf t_e_psnym.
+noninterf Rnd_psnym.
+noninterf CK_psnym.
+
+
+let Vehicle_Process (lsk_v:skey, lpk_RA:pkey, psnym:bitstring, psnym_k:skey) = 
+    in(CRLC, (=pk(lsk_v)));
+
+    new Id_req:bitstring;
+    new Act:bitstring;
+    new nonce:Nonce;
+    new t_now:Time;
+
+    (* Constructing appeal request *)
+    let appeal_request = (Id_req, Act, pk(lsk_v), nonce, t_now) in 
+    let signed_appeal_request = sign(appeal_request, lsk_v) in
+    out(tlsC_RA_V, (pk(lsk_v), appeal_request, signed_appeal_request));
+
+    (* Receiving challenge from RA *)
+    in(tlsC_RA_V, (=pk(lsk_v), challenge:bitstring, signed_challenge:bitstring));
+    if verify(challenge, signed_challenge, lpk_RA) then
+        let (Id_req:bitstring, t_s_psnym:Time, t_e_psnym:Time, Rnd_appeal:bitstring, nonce':Nonce, t_now':Time) = challenge in
+
+        new Id_req:bitstring;
+        new nonce:Nonce;
+        new t_now:Time;
+
+        (* Signing the challenge to prove possession of the pseudonym *)
+        let signed_Rnd_appeal = sign(Rnd_appeal, psnym_k) in
+        let challenge_response = (Id_req, psnym, signed_Rnd_appeal, nonce, t_now) in     
+        let signed_challenge_response = sign(challenge_response, lsk_v) in
+        out(tlsC_RA_V, (pk(lsk_v), psnym, challenge_response, signed_challenge_response, V)).
+
+let RA_Process (lsk_RA:skey, lpk_v:pkey, reported_psnym:bitstring) = 
+
+    let ((psnym_K:pkey, CK_psnym:bitstring, t_s_psnym:Time, t_e_psnym:Time)) = reported_psnym in 
+    
+    (* Notifying the vehicle that its certificate has been revoked *)
+    out(CRLC, (lpk_v));
+    
+    (* Accepting appeal request from the vehicle *)
+    in(tlsC_RA_V, (=lpk_v, appeal_request:bitstring, signed_appeal_request:bitstring));
+    
+    if verify(appeal_request, signed_appeal_request, lpk_v) then
+        new Id_req:bitstring;
+        new Act:bitstring;
+        new nonce:Nonce;
+        new t_now:Time;
+        new Rnd_appeal:bitstring;
+        
+        (* Constructing challenge for the appeal request *)
+        let challenge = (Id_req, t_s_psnym, t_e_psnym, Rnd_appeal, nonce, t_now) in (* t_s_psnym and t_e_psnym are the infor from the reported pseudonym *)
+        let signed_challenge = sign(challenge, lsk_RA) in
+        out(tlsC_RA_V, (lpk_v, challenge, signed_challenge));
+        
+        in(tlsC_RA_V, (=lpk_v, psnym':bitstring, challenge_response:bitstring, signed_challenge_response:bitstring, V:Host));
+        let (Id_req:bitstring, =psnym', signed_Rnd_appeal:bitstring, nonce':Nonce, t_now':Time) = challenge_response in
+
+        let (psnym_K':pkey, CK_psnym':bitstring, t_s_psnym':Time, t_e_psnym':Time) = psnym' in
+            if verify(challenge_response, signed_challenge_response, lpk_v) then
+                if verify(Rnd_appeal, signed_Rnd_appeal, psnym_K') then
+                    if t_s_psnym' = t_s_psnym && t_e_psnym' = t_e_psnym then
+                        if psnym' = reported_psnym then
+                            event appeal_mechanism_complete(RA, V).
+
+
+process
+    new Rnd_tkt:bitstring;
+    new t_s:Time;
+    new t_e:Time;
+    new np:bitstring;
+    let H1 = H(Rnd_tkt) in
+    let H2 = H(Rnd_tkt) in
+    new Rnd_ck_tkt:bitstring;
+
+    let CK_tkt = H((pk(lsk_v), t_s, t_e, Rnd_ck_tkt)) in
+    let ticket = (np, H1, H2, CK_tkt, t_s, t_e) in
+
+    new t_s_psnym:Time;
+    new t_e_psnym:Time;
+    new Rnd_psnym:bitstring;
+    new psnym_k:skey;   (* Private key of the pseudonym *)
+
+    let CK_psnym = H((CK_tkt, pk(psnym_k), t_s_psnym, t_e_psnym, H(Rnd_psnym))) in
+    let psnym = (pk(psnym_k), CK_psnym, t_s_psnym, t_e_psnym) in
+
+   
+    (!Vehicle_Process(lsk_v, pk(lsk_RA), psnym, psnym_k))
+    |(!RA_Process(lsk_RA, pk(lsk_v), psnym))

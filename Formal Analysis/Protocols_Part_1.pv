@@ -1,0 +1,325 @@
+(* Part I covers protocols 1-6 *)
+(* 
+    Protocol 1: Vehicle Generates Ticket Request
+    Protocol 2: LTCA Issues a Ticket
+    Protocol 3: Vehicle Generates Pseudonym Request
+    Protocol 4: Generating Pseudonyms by PCA
+    Protocol 5: Pseudonym Resolution
+    Protocol 6: Ticket Resolution
+*)
+
+(* By Keyao Huang *)
+
+
+
+(* Key type *)
+type skey.
+type pkey.
+fun pk(skey): pkey.
+
+(* Signature *)
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, sk: skey; verify(m, sign(m, sk), pk(sk)) = true.
+
+(* Hash function *)
+fun H(bitstring) : bitstring.
+
+(* Defining a typeConverter to take input of type data and returns a result of pkey. *)
+fun pkey_to_bitstring(pkey): bitstring [typeConverter].
+
+type Nonce.
+type Time.
+type Host.
+
+free V:Host.
+free LTCA:Host.
+free PCA_i:Host.
+free PCA_j:Host.
+(* free PCA_k:Host.
+free PCA_l:Host. *)
+free RA:Host.
+
+(* Assume that TLS has been established and the key has been negotiated. *) 
+free tlsC_LTCA_V: channel[private].
+free tlsC_PCA_i_V:channel[private].
+free tlsC_PCA_j_V:channel[private].
+free tlsC_RA_V:channel[private].
+free tlsC_RA_PCA:channel[private].
+free tlsC_RA_LTCA:channel[private].
+
+(* Vehicle communication system channel *)
+free VCC:channel.
+
+(* Private keys for entities *)
+free lsk_v:skey[private].
+free lpk_v:pkey[private].
+free lsk_LTCA:skey[private].
+free lsk_PCA_i:skey[private].
+free lsk_PCA_j:skey[private].
+free lsk_RA:skey[private].
+
+
+(* Target PCA ID *)
+free ID_PCA_i:bitstring[private].
+free ID_PCA_j:bitstring[private].
+
+free t_s:Time[private].
+free t_e:Time[private].
+free Rnd_tkt:bitstring[private].
+free Rnd_ck_tkt: bitstring[private].
+free ticket:bitstring[private].
+free CK_tkt:bitstring[private].
+
+free t_s_psnym:Time[private].
+free t_e_psnym:Time[private].
+free Rnd_psnym:bitstring[private].
+free CK_psnym:bitstring[private].
+
+(* Pseudonym private keys *)
+free psnym_k_i:skey[private].
+free psnym_k_j:skey[private].
+
+event ticket_response_is_validated(Host, Host).
+event psnym_response_is_validated(Host, Host).
+event RA_received_report(Host, Host).
+event psnym_resolution_response_is_validated(Host, Host).
+event ticket_resolution_response_is_validated(Host, Host).
+
+query event (ticket_response_is_validated(V, LTCA)).
+query event (psnym_response_is_validated(V, PCA_i)).
+query event (psnym_response_is_validated(V, PCA_j)).
+query event (RA_received_report(V, RA)).
+query event (psnym_resolution_response_is_validated(RA, PCA_i)).
+query event (psnym_resolution_response_is_validated(RA, PCA_j)).
+query event (ticket_resolution_response_is_validated(RA, LTCA)).
+
+
+query attacker(lsk_v).
+query attacker(lpk_v).
+query attacker(lsk_LTCA).
+query attacker(lsk_PCA_i).
+query attacker(lsk_PCA_j).
+
+query attacker(ticket).
+query attacker(t_s).
+query attacker(t_e).
+query attacker(Rnd_tkt).
+query attacker(Rnd_ck_tkt).
+query attacker(CK_tkt).
+query attacker(t_s_psnym).
+query attacker(t_e_psnym).
+query attacker(Rnd_psnym).
+query attacker(CK_psnym).
+
+
+(* For strong-secrecy *)
+noninterf ticket.
+noninterf lsk_v.
+noninterf lpk_v.
+noninterf t_s.
+noninterf t_e.
+noninterf Rnd_tkt.
+noninterf Rnd_ck_tkt.
+noninterf CK_tkt.
+noninterf t_s_psnym.
+noninterf t_e_psnym.
+noninterf Rnd_psnym.
+noninterf CK_psnym.
+
+
+let Vehicle_Process(lsk_v:skey, lpk_LTCA:pkey, lpk_PCA_i:pkey, lpk_PCA_j:pkey, lpk_RA:pkey, ID_PCA_i:bitstring, ID_PCA_j:bitstring) =
+    
+    (* Defining ticket request parameters *)
+    new Id_req:bitstring;
+    new np:bitstring;
+    new nonce:Nonce;
+    new t_now:Time;
+    new Rnd_tkt:bitstring;
+
+    (* Constructing the ticket request *)
+    let H1 = H((ID_PCA_i,1,Rnd_tkt)) in
+    let H2 = H((ID_PCA_j,2,Rnd_tkt)) in
+    let ticket_request = (Id_req, np, H1, H2, t_s, t_e) in
+    let signed_ticket_request = sign(ticket_request, lsk_v) in
+    
+    (* Sending and receiving the ticket request *)
+    out(tlsC_LTCA_V, (ticket_request, signed_ticket_request, (V, pk(lsk_v)), nonce, t_now));
+    in(tlsC_LTCA_V, (Id_req:bitstring, ticket:bitstring, signed_ticket:bitstring, Rnd_ck_tkt:bitstring, LTCA:Host, nonce:Nonce, t_now:Time));
+
+                        
+    let (=np,  =H1, =H2, CK_tkt:bitstring, =t_s, =t_e) = ticket in
+    if verify(ticket, signed_ticket, lpk_LTCA) && H((pk(lsk_v), t_s, t_e, Rnd_ck_tkt)) = CK_tkt then
+        (* Successful ticket acquisition and validation. *)
+        event ticket_response_is_validated(V, LTCA);
+
+        (* Generating pseudonym keys *)
+        new psnym_k_i:skey;
+        new psnym_k_j:skey;
+
+        (* Defining pseudonym request parameters *)
+        new Id_req:bitstring;
+        new nonce:Nonce;
+        new t_now:Time;
+
+        (* Constructing the pseudonym request. *)
+        let signed_psnym_K_i = sign(pkey_to_bitstring(pk(psnym_k_i)), psnym_k_i) in
+        let signed_psnym_K_j = sign(pkey_to_bitstring(pk(psnym_k_j)), psnym_k_j) in
+
+        (* Getting pseudonym from  PCA_i *)
+        out(tlsC_PCA_i_V, (Id_req, Rnd_tkt, ticket, signed_ticket, pk(psnym_k_i), signed_psnym_K_i, nonce, t_now));
+        in(tlsC_PCA_i_V, (Id_req:bitstring, psnym_i:bitstring, signed_psnym_i:bitstring, Rnd_psnym_i:bitstring, PCA_i:Host, nonce':Nonce, t_now':Time));
+        let (=pk(psnym_k_i), CK_psnym_i:bitstring, t_s_psnym_i:Time, t_e_psnym_i:Time) = psnym_i in 
+        
+         (* Getting pseudonym from  PCA_j *)
+        out(tlsC_PCA_j_V, (Id_req, Rnd_tkt, ticket, signed_ticket, pk(psnym_k_j), signed_psnym_K_j, nonce, t_now));
+        in(tlsC_PCA_j_V, (Id_req:bitstring, psnym_j:bitstring, signed_psnym_j:bitstring, Rnd_psnym_j:bitstring, PCA_j:Host, nonce':Nonce, t_now':Time));
+        let (=pk(psnym_k_j), CK_psnym_j:bitstring, t_s_psnym_j:Time, t_e_psnym_j:Time) = psnym_j in 
+
+
+        (* Validating PCAs' signatures and pseudonym commitment keys to see if PCAs bound *)
+        (* the ticket to the pseudonyms correctly. *)
+        if verify(psnym_i, signed_psnym_i, lpk_PCA_i) && H((CK_tkt, pk(psnym_k_i), t_s_psnym_i, t_e_psnym_i, H(Rnd_psnym_i))) = CK_psnym_i 
+        && verify(psnym_j, signed_psnym_j, lpk_PCA_j) && H((CK_tkt, pk(psnym_k_j), t_s_psnym_j, t_e_psnym_j, H(Rnd_psnym_j))) = CK_psnym_j then
+            event psnym_response_is_validated(V, PCA_i);
+            event psnym_response_is_validated(V, PCA_j);
+
+            (* Using pseudonym in vehicle communication system *)
+            out(VCC, ((psnym_i, signed_psnym_i))).
+
+
+let LTCA_Process(lsk_LTCA:skey, lpk_RA:pkey) = 
+    in(tlsC_LTCA_V, (ticket_request:bitstring, signed_ticket_request:bitstring, 
+                    (VehicleX:Host, lpk_v_x:pkey), nonce:Nonce, t_now:Time));
+    
+    if verify(ticket_request, signed_ticket_request, lpk_v_x) then
+        let (Id_req:bitstring, np:bitstring, H1:bitstring, H2:bitstring, t_s:Time, t_e:Time) = ticket_request in
+        
+        new Rnd_ck_tkt:bitstring;
+        new Id_req:bitstring;
+        new nonce:Nonce;
+        new t_now:Time;
+        
+        let CK_tkt = H((lpk_v_x, t_s, t_e, Rnd_ck_tkt)) in
+        let ticket = (np, H1, H2, CK_tkt, t_s, t_e) in
+        let signed_ticket = sign(ticket, lsk_LTCA) in
+        out (tlsC_LTCA_V, (Id_req, ticket, signed_ticket, Rnd_ck_tkt, LTCA, nonce, t_now));
+        
+        (* Ticket resolution from RA *)
+        in(tlsC_RA_LTCA, (=ticket, ticket_resolution_request:bitstring, signed_ticket_resolution_request:bitstring));
+        if verify(ticket_resolution_request, signed_ticket_resolution_request, lpk_RA) then
+            let (Id_req:bitstring, Act:bitstring, =ticket, nonce:Nonce, t_now:Time) = ticket_resolution_request in
+            let ticket_resolution_request_response = (lpk_v_x, Rnd_ck_tkt) in
+            let signed_ticket_resolution_request_response = sign(ticket_resolution_request_response, lsk_LTCA) in
+            out(tlsC_RA_LTCA, (ticket, ticket_resolution_request_response, signed_ticket_resolution_request_response, LTCA)).
+
+let PCA_i_Process(ID_PCA:bitstring, lsk_PCA_i:skey, lpk_LTCA:pkey, lpk_RA:pkey) = 
+    in(tlsC_PCA_i_V, (Id_req:bitstring, Rnd_tkt:bitstring, ticket:bitstring, signed_ticket:bitstring,
+                      psnym_K:pkey, signed_psnym_K:bitstring, nonce:Nonce, t_now:Time));
+    if verify(ticket, signed_ticket, lpk_LTCA) then
+        let (np:bitstring,  H1:bitstring, H2:bitstring, CK_tkt:bitstring,t_s:Time, t_e:Time) = ticket in
+        if H((ID_PCA,1,Rnd_tkt)) = H1 then
+            if verify(pkey_to_bitstring(psnym_K), signed_psnym_K, psnym_K) then
+                
+                (* Pseudonym related parameters *)
+                new Id_req:bitstring;
+                new t_s_psnym:Time;
+                new t_e_psnym:Time;
+                new Rnd_psnym:bitstring;
+                new nonce:bitstring;
+                new t_now:Time;
+
+                (* Generating pseudonym *)
+                let CK_psnym = H((CK_tkt, psnym_K, t_s_psnym, t_e_psnym, H(Rnd_psnym))) in
+                let psnym = (psnym_K, CK_psnym, t_s_psnym, t_e_psnym) in
+                let signed_psnym = sign(psnym, lsk_PCA_i) in
+                (* Issuing pseudonym *)
+                out(tlsC_PCA_i_V, (Id_req, psnym, signed_psnym, Rnd_psnym, PCA_i, nonce, t_now));
+
+                (* Pseudonym resolution from RA *)
+                in(tlsC_RA_PCA, (=psnym, psnym_resolution_request:bitstring, signed_psnym_resolution_request:bitstring));
+                if verify(psnym_resolution_request, signed_psnym_resolution_request, lpk_RA) then 
+                    out(tlsC_RA_PCA, (psnym, (psnym, ticket, signed_ticket, H(Rnd_psnym)), sign((psnym, ticket, signed_ticket, H(Rnd_psnym)), lsk_PCA_i), PCA_i)).
+
+
+let PCA_j_Process(ID_PCA:bitstring, lsk_PCA_j:skey, lpk_LTCA:pkey, lpk_RA:pkey) = 
+    in(tlsC_PCA_j_V, (Id_req:bitstring, Rnd_tkt:bitstring, ticket:bitstring, signed_ticket:bitstring,
+                      psnym_K:pkey, signed_psnym_K:bitstring, nonce:Nonce, t_now:Time));
+    if verify(ticket, signed_ticket, lpk_LTCA) then
+        let (np:bitstring,  H1:bitstring, H2:bitstring, CK_tkt:bitstring,t_s:Time, t_e:Time) = ticket in
+        if H((ID_PCA,2,Rnd_tkt)) = H2 then
+            if verify(pkey_to_bitstring(psnym_K), signed_psnym_K, psnym_K) then
+                
+                (* Pseudonym related parameters *)
+                new Id_req:bitstring;
+                new t_s_psnym:Time;
+                new t_e_psnym:Time;
+                new Rnd_psnym:bitstring;
+                new nonce:bitstring;
+                new t_now:Time;
+
+                (* Generating pseudonym *)
+                let CK_psnym = H((CK_tkt, psnym_K, t_s_psnym, t_e_psnym, H(Rnd_psnym))) in
+                let psnym = (psnym_K, CK_psnym, t_s_psnym, t_e_psnym) in
+                let signed_psnym = sign(psnym, lsk_PCA_j) in
+                (* Issuing pseudonym *)
+                out(tlsC_PCA_j_V, (Id_req, psnym, signed_psnym, Rnd_psnym, PCA_j, nonce, t_now));
+
+                (* Pseudonym resolution from RA *)
+                in(tlsC_RA_PCA, (=psnym, psnym_resolution_request:bitstring, signed_psnym_resolution_request:bitstring));
+                if verify(psnym_resolution_request, signed_psnym_resolution_request, lpk_RA) then 
+                    out(tlsC_RA_PCA, (psnym, (psnym, ticket, signed_ticket, H(Rnd_psnym)), sign((psnym, ticket, signed_ticket, H(Rnd_psnym)), lsk_PCA_j), PCA_j)).
+
+(* The entity that sends the report to the RA, which can be vehicles or CAs. *)
+let Reporter_Process = 
+    in(VCC, (psnym:bitstring, signed_psnym:bitstring));
+    (* Reporting suspicious pseudonyms to the RA *)
+        new report:bitstring;
+        out(tlsC_RA_V, (report, psnym, signed_psnym, V)).
+
+let RA_Process (lsk_RA:skey, lpk_LTCA:pkey, lpk_PCA_i:pkey, lpk_PCA_j:pkey) = 
+    in(tlsC_RA_V, (report:bitstring, suspicious_psnym:bitstring, signed_suspicious_psnym:bitstring, V:Host));
+    event RA_received_report(V, RA);
+
+    let (psnym_K:pkey, CK_psnym:bitstring, t_s_psnym:Time, t_e_psnym:Time) = suspicious_psnym in
+    new Id_req:bitstring;
+    new Act:bitstring;
+    new nonce:Nonce;
+    new t_now:Time;
+
+    (* Constructing pseudonym resolution request *)
+    let psnym_resolution_request = (Id_req, Act, suspicious_psnym, nonce, t_now) in
+    let signed_psnym_resolution_request = sign(psnym_resolution_request, lsk_RA) in
+    
+    out(tlsC_RA_PCA, (suspicious_psnym, psnym_resolution_request, signed_psnym_resolution_request));
+    in(tlsC_RA_PCA, (=suspicious_psnym, psnym_resolution_request_response:bitstring, signed_psnym_resolution_request_response:bitstring, PCA:Host));
+    let (=suspicious_psnym, ticket:bitstring, signed_ticket:bitstring, Rnd_psnym_hash:bitstring) = psnym_resolution_request_response in
+    if verify(ticket, signed_ticket, lpk_LTCA) then
+        let (np:bitstring,  H1:bitstring, H2:bitstring, CK_tkt:bitstring, t_s:Time, t_e:Time) = ticket in
+        (* verifying whether pseudonym was generated by a valid ticket *)
+        if H((CK_tkt, psnym_K, t_s_psnym, t_e_psnym, Rnd_psnym_hash)) = CK_psnym then
+            event psnym_resolution_response_is_validated(RA, PCA);
+
+            new Id_req:bitstring;
+            new Act:bitstring;
+            new nonce:Nonce;
+            new t_now:Time;
+
+            (* Constructing ticket resolution request *)
+            let ticket_resolution_request = (Id_req, Act, ticket, nonce, t_now) in
+            let signed_ticket_resolution_request = sign(ticket_resolution_request, lsk_RA) in
+            out(tlsC_RA_LTCA, (ticket, ticket_resolution_request, signed_ticket_resolution_request));
+            in(tlsC_RA_LTCA, (=ticket, ticket_resolution_request_response:bitstring, signed_ticket_resolution_request_response:bitstring, LTCA:Host));
+            let (lpk_v:pkey, Rnd_ck_tkt:bitstring) = ticket_resolution_request_response in
+            if H((lpk_v, t_s, t_e, Rnd_ck_tkt)) = CK_tkt then
+                event ticket_resolution_response_is_validated(RA, LTCA).
+
+
+
+
+process
+    (!Vehicle_Process(lsk_v, pk(lsk_LTCA), pk(lsk_PCA_i), pk(lsk_PCA_j), pk(lsk_RA), ID_PCA_i, ID_PCA_j))
+    | (!LTCA_Process(lsk_LTCA, pk(lsk_RA)))
+    | (!PCA_i_Process(ID_PCA_i, lsk_PCA_i, pk(lsk_LTCA), pk(lsk_RA)))
+    | (!PCA_j_Process(ID_PCA_j, lsk_PCA_j, pk(lsk_LTCA), pk(lsk_RA)))
+    | (!Reporter_Process)
+    | (!RA_Process(lsk_RA, pk(lsk_LTCA), pk(lsk_PCA_i), pk(lsk_PCA_j)))
